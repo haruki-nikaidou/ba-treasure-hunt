@@ -19,6 +19,9 @@ struct State {
 struct SolverData {
     cols: usize,
     type_placements: [SmallVec<[Placement; 2]>; 3],
+    /// Inverted placement index: for each cell `ci`, the list of placements that
+    /// overlap it, as `(treasure_type, placement_idx)` pairs. Used to enumerate
+    /// the hit branches when a probe lands on `ci`.
     cell_coverage: Vec<SmallVec<[(usize, usize); 3]>>,
     total_cells: usize,
 }

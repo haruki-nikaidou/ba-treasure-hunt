@@ -9,13 +9,15 @@
 //!
 //! Reference values: `a=9`, `b=5`. `1<=a_i<b_i<=4`. `3<=n_1+n_2+n_3<=15`.
 
+use smallvec::SmallVec;
+
 pub mod algorithm;
 
 /// Bitmask of grid cells occupied by this placement, with bit `y * A + x` set
 /// for each cell `(x, y)` covered by the piece.
 ///
 /// Use `0` to represent an initial cell, `1` to represent a revealed cell
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct Board(pub u64);
 
 impl Board {
@@ -75,7 +77,7 @@ impl Board {
         let musk = Self::area_to_bits(area);
         musk & self.0 == 0
     }
-    pub fn search_empty_area(&self, size: Coordinate) -> Option<Coordinate> {
+    pub fn search_empty_area(&self, size: Coordinate) -> SmallVec<[Coordinate; 5]> {
         let bits = Self::area_to_bits(Area {
             start: Coordinate { x: 0, y: 0 },
             size,
@@ -84,8 +86,9 @@ impl Board {
         let board_end = Self::A * Self::B - 1;
         let match_ranges = board_end - area_end;
         (0..match_ranges)
-            .find(|&shift| self.0 & (bits << shift) != 0)
+            .filter(|&shift| self.0 & (bits << shift) != 0)
             .map(Self::index_to_coord)
+            .collect()
     }
 }
 
@@ -130,7 +133,7 @@ impl std::ops::Add for Coordinate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Treasure {
     pub size: Coordinate,
     pub amount: u8,
@@ -139,6 +142,20 @@ pub struct Treasure {
 #[derive(Debug, Clone, Copy)]
 pub struct TreasureHuntProblem {
     pub treasures: [Treasure; 3],
+}
+
+#[derive(Debug, Clone, Copy, Hash)]
+pub struct SubQuestion {
+    pub board: Board,
+    pub treasures: [Treasure; 3],
+}
+
+impl std::ops::Sub<PlacementInfo> for SubQuestion {
+    type Output = ();
+
+    fn sub(self, rhs: PlacementInfo) -> Self::Output {
+        
+    }
 }
 
 impl TreasureHuntProblem {
@@ -191,11 +208,13 @@ pub struct PlacementInfo {
 /// The decision tree.
 #[derive(Clone, Debug)]
 pub enum DecisionTree {
-    Leaf,
-    Probe {
-        row: u8,
-        col: u8,
-        on_empty: Box<DecisionTree>,
-        on_hit: Vec<(PlacementInfo, Box<DecisionTree>)>,
-    },
+    Leaf(Board),
+    Probe(Decision, SubQuestion),
+}
+
+#[derive(Clone, Debug)]
+pub struct Decision {
+    pub position: Coordinate,
+    pub on_empty: Box<DecisionTree>,
+    pub on_hit: Vec<(PlacementInfo, Box<DecisionTree>)>,
 }

@@ -1,8 +1,10 @@
-use crate::{CellMark, DecisionTree, PlacementInfo, TreasureHuntProblem};
+use crate::{
+    Board, CellMark, Coordinate, DecisionTree, Orientation, PlacementInfo, Treasure,
+    TreasureHuntProblem,
+};
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 use std::time::{Duration, Instant};
-
 
 /// A single valid placement of a treasure piece on the grid.
 #[derive(Clone, Copy, Debug)]
@@ -59,6 +61,41 @@ struct Caches {
 }
 
 // ─── Placement Enumeration ───────────────────────────────────────────────────
+
+fn find_placements_for_one_treasure(
+    treasure_type: u8,
+    treasure_size: Coordinate,
+    board: Board,
+) -> SmallVec<[PlacementInfo; 5]> {
+    let orientation = treasure_size.get_orientation();
+    let default_result =
+        board
+            .search_empty_area(treasure_size)
+            .into_iter()
+            .map(|c| PlacementInfo {
+                treasure_type,
+                position: c,
+                orientation,
+            });
+    if orientation != Orientation::Equal {
+        let transposed = treasure_size.transpose();
+        let another_orientation = transposed.get_orientation();
+        let another_result =
+            board
+                .search_empty_area(transposed)
+                .into_iter()
+                .map(|c| PlacementInfo {
+                    treasure_type,
+                    position: c,
+                    orientation: another_orientation,
+                });
+        default_result.chain(another_result).collect()
+    } else {
+        default_result.collect()
+    }
+}
+
+fn find_all_placements()
 
 /// Returns every distinct placement of a treasure piece with nominal dimensions
 /// `w×h` inside a `cols×rows` grid.

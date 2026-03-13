@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 smallvec = "1.15"
 rustc-hash = "2"
+crossterm = "0.28"
 
 [profile.release]
 opt-level = 3

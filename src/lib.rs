@@ -14,14 +14,14 @@ pub mod algorithm;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellMark {
     Unknown,
-    Empty
+    Empty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Treasure {
     pub width: u8,
     pub length: u8,
-    pub amount: u8
+    pub amount: u8,
 }
 
 pub struct TreasureHuntProblem<const A: usize, const B: usize> {

@@ -7,7 +7,7 @@
 //! if a cell contains a treasure, regardless of how the treasure is oriented,
 //! all cells belonging to that treasure are revealed. Find the decision tree with the minimum height.
 //!
-//! Reference values: `a=9`, `b=5`. `1<a_i<b_i<4`. `3<n_1+n_2+n_3<15`.
+//! Reference values: `a=9`, `b=5`. `1<=a_i<b_i<=4`. `3<=n_1+n_2+n_3<=15`.
 
 pub mod algorithm;
 

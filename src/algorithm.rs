@@ -3,37 +3,68 @@ use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 use std::time::{Duration, Instant};
 
+/// A single valid placement of a treasure piece on the grid.
 #[derive(Clone, Copy, Debug)]
 struct Placement {
+    /// Metadata describing the treasure type, top-left corner, and orientation.
     info: PlacementInfo,
+    /// Bitmask of grid cells occupied by this placement, with bit `r*cols + c` set
+    /// for each cell `(r, c)` covered by the piece.
     cells: u64,
 }
 
+/// The solver's view of the current search state, used as a memoization key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct State {
+    /// Bitmask of cells that are definitively not covered by any remaining
+    /// treasure. Bit `r*cols + c` is set if cell `(r, c)` has been ruled out —
+    /// either because it was probed and returned "empty", or because a
+    /// previously revealed treasure occupies it.
     forbidden: u64,
+    /// Number of pieces of each treasure type that still need to be placed in
+    /// the configuration space. `remaining[t]` counts how many type-`t`
+    /// treasures have not yet been located.
     remaining: [u8; 3],
 }
 
+/// Precomputed, problem-specific data used throughout the search.
 #[derive(Debug, Clone)]
 struct SolverData {
+    /// Number of columns in the grid (equals the const generic `A`).
     cols: usize,
+    /// All valid placements for each of the three treasure types.
+    /// `type_placements[t]` lists every axis-aligned rectangle of the
+    /// correct dimensions (both orientations) that fits within the grid,
+    /// deduplicated by cell bitmask.
     type_placements: [SmallVec<[Placement; 2]>; 3],
     /// Inverted placement index: for each cell `ci`, the list of placements that
     /// overlap it, as `(treasure_type, placement_idx)` pairs. Used to enumerate
     /// the hit branches when a probe lands on `ci`.
     cell_coverage: Vec<SmallVec<[(usize, usize); 3]>>,
+    /// Total number of cells in the grid (`A * B`).
     total_cells: usize,
 }
 
+/// Memoization tables shared across the search.
 #[derive(Debug, Clone)]
 struct Caches {
+    /// Maps a `State` to the exact number of valid complete configurations
+    /// (ways to place all remaining treasures in non-forbidden cells).
     count: FxHashMap<State, u64>,
+    /// Maps a `State` to a proven lower bound on the minimax probe depth
+    /// needed to identify the configuration. If `depth_lb[s] = k`, no
+    /// strategy can solve state `s` in fewer than `k` probes.
     depth_lb: FxHashMap<State, u8>,
 }
 
 // ─── Placement Enumeration ───────────────────────────────────────────────────
 
+/// Returns every distinct placement of a treasure piece with nominal dimensions
+/// `w×h` inside a `cols×rows` grid.
+///
+/// Both axis-aligned orientations (`w×h` and `h×w`) are tried; if the piece is
+/// square they collapse to one. The list is sorted and deduplicated by cell
+/// bitmask so that rotating a square piece never yields a duplicate entry.
 fn enumerate_placements(
     treasure_type: u8,
     w: u8,
@@ -81,6 +112,11 @@ fn enumerate_placements(
     placements
 }
 
+/// Precomputes all placement lists and the cell-coverage index for the given
+/// problem, producing the `SolverData` that is shared across the entire search.
+///
+/// Panics if the grid has more than 64 cells, since the algorithm represents
+/// cell sets as `u64` bitmasks.
 fn build_solver_data<const A: usize, const B: usize>(
     problem: &TreasureHuntProblem<A, B>,
 ) -> SolverData {
@@ -122,6 +158,9 @@ fn build_solver_data<const A: usize, const B: usize>(
 
 // ─── Configuration Counting ──────────────────────────────────────────────────
 
+/// Returns the number of valid complete configurations reachable from `state`:
+/// the number of ways to place every remaining treasure in non-forbidden cells
+/// without overlap. Results are memoized in `caches.count`.
 fn count_configs(data: &SolverData, caches: &mut Caches, state: State) -> u64 {
     if let Some(&c) = caches.count.get(&state) {
         return c;
@@ -131,6 +170,13 @@ fn count_configs(data: &SolverData, caches: &mut Caches, state: State) -> u64 {
     result
 }
 
+/// Recursive inner loop for `count_configs`.
+///
+/// Places each treasure type in turn, iterating over placements in index order
+/// to avoid counting the same multi-piece assignment twice. For a given
+/// `type_idx`, only placements at index `>= min_pi` are considered so that
+/// pieces of the same type are placed in a canonical (non-decreasing index)
+/// order.
 fn count_inner(
     data: &SolverData,
     forbidden: u64,
@@ -157,6 +203,11 @@ fn count_inner(
     total
 }
 
+/// Returns ⌈log₂(n)⌉, clamped to 0 for `n ≤ 1`.
+///
+/// Used as the information-theoretic lower bound on the number of probes
+/// needed to distinguish among `n` configurations: any binary decision tree
+/// with `n` leaves has height at least ⌈log₂(n)⌉.
 fn ceil_log2(n: u64) -> u8 {
     if n <= 1 {
         0
@@ -172,22 +223,45 @@ fn ceil_log2(n: u64) -> u8 {
 //   hit branches = one per placement covering this cell
 // Returns (worst_branch_size, branch_details).
 
+/// One possible "hit" outcome when a probe lands on a cell that is covered by
+/// a known placement.
 #[derive(Debug, Clone, Copy)]
 struct HitBranch {
-    /// Index into `SolverData::type_placements` selecting the treasure type.
+    /// Index into `SolverData::type_placements` identifying which treasure type
+    /// was hit.
     treasure_type: usize,
-    /// Index of the specific placement within `type_placements[treasure_type]`.
+    /// Index of the specific placement within `type_placements[treasure_type]`
+    /// that was revealed by this hit.
     placement_idx: usize,
-    /// Number of valid configurations remaining if this placement is confirmed.
+    /// Number of valid configurations consistent with the current state after
+    /// this placement is confirmed and removed from the remaining set.
     config_count: u64,
 }
 
+/// The result of analysing a single candidate probe cell: how it partitions the
+/// current configuration space into branches.
 #[derive(Debug, Clone)]
 struct CellPartition {
+    /// Size of the largest branch that can result from probing this cell.
+    /// This is `max(miss_count, hit_0_count, hit_1_count, …)` and is the
+    /// quantity minimised by the greedy and exact strategies.
     pub worst_branch_size: u64,
+    /// All hit branches — one per valid placement that covers this cell and is
+    /// consistent with the current state.
     pub hits: Vec<HitBranch>,
 }
 
+/// Partitions the `total` configurations reachable from `state` according to
+/// the outcome of probing cell `ci`.
+///
+/// A probe on `ci` yields one of the following outcomes:
+/// - **Miss**: the cell is empty; `total - Σ(hit counts)` configurations remain.
+/// - **Hit** (one per valid placement covering `ci`): the placement is fully
+///   revealed; the state transitions by forbidding those cells and decrementing
+///   the corresponding treasure count.
+///
+/// Returns the `CellPartition` containing all hit branches and the worst-case
+/// (largest) branch size across the miss and all hit branches.
 fn cell_partition(
     data: &SolverData,
     caches: &mut Caches,
@@ -233,6 +307,12 @@ fn cell_partition(
 
 // ─── Greedy Solver ───────────────────────────────────────────────────────────
 
+/// Computes the worst-case depth of the greedy decision tree rooted at `state`
+/// without materialising the tree itself.
+///
+/// At each step the cell that minimises the largest branch size is chosen
+/// (see `pick_greedy_cell`), then the function recurses into every branch
+/// (miss and all hits) and returns `1 + max(recursive depths)`.
 fn greedy_depth(data: &SolverData, caches: &mut Caches, state: State) -> u8 {
     let total = count_configs(data, caches, state);
     if total <= 1 {
@@ -251,7 +331,12 @@ fn greedy_depth(data: &SolverData, caches: &mut Caches, state: State) -> u8 {
 
     // Hit branches
     let CellPartition { hits, .. } = cell_partition(data, caches, &state, best_ci, total);
-    for &HitBranch { treasure_type: t, placement_idx: pi, .. } in &hits {
+    for &HitBranch {
+        treasure_type: t,
+        placement_idx: pi,
+        ..
+    } in &hits
+    {
         let p = &data.type_placements[t][pi];
         let mut rem = state.remaining;
         rem[t] -= 1;
@@ -264,6 +349,11 @@ fn greedy_depth(data: &SolverData, caches: &mut Caches, state: State) -> u8 {
     1 + worst
 }
 
+/// Builds and returns the full greedy `DecisionTree` rooted at `state`.
+///
+/// Uses the same greedy cell-selection strategy as `greedy_depth` but
+/// materialises the tree, recursing into every branch to construct the
+/// complete subtrees.
 fn greedy_tree(data: &SolverData, caches: &mut Caches, state: State) -> DecisionTree {
     let total = count_configs(data, caches, state);
     if total <= 1 {
@@ -282,16 +372,22 @@ fn greedy_tree(data: &SolverData, caches: &mut Caches, state: State) -> Decision
     let CellPartition { hits, .. } = cell_partition(data, caches, &state, best_ci, total);
     let on_hit: Vec<(PlacementInfo, Box<DecisionTree>)> = hits
         .iter()
-        .map(|&HitBranch { treasure_type: t, placement_idx: pi, .. }| {
-            let p = &data.type_placements[t][pi];
-            let mut rem = state.remaining;
-            rem[t] -= 1;
-            let hs = State {
-                forbidden: state.forbidden | p.cells,
-                remaining: rem,
-            };
-            (p.info, Box::new(greedy_tree(data, caches, hs)))
-        })
+        .map(
+            |&HitBranch {
+                 treasure_type: t,
+                 placement_idx: pi,
+                 ..
+             }| {
+                let p = &data.type_placements[t][pi];
+                let mut rem = state.remaining;
+                rem[t] -= 1;
+                let hs = State {
+                    forbidden: state.forbidden | p.cells,
+                    remaining: rem,
+                };
+                (p.info, Box::new(greedy_tree(data, caches, hs)))
+            },
+        )
         .collect();
 
     DecisionTree::Probe {
@@ -302,7 +398,9 @@ fn greedy_tree(data: &SolverData, caches: &mut Caches, state: State) -> Decision
     }
 }
 
-/// Pick the cell that minimises the worst-case branch config count.
+/// Scans all non-forbidden cells and returns the index of the one that
+/// minimises the worst-case branch configuration count (i.e., the greedy
+/// minimax cell), along with that worst-case count.
 fn pick_greedy_cell(
     data: &SolverData,
     caches: &mut Caches,
@@ -328,6 +426,20 @@ fn pick_greedy_cell(
 
 // ─── Exact Minimax Search ────────────────────────────────────────────────────
 
+/// Attempts to find a probing strategy for `state` whose worst-case depth does
+/// not exceed `budget`, returning `Some(optimal_depth)` on success or `None`
+/// if no such strategy exists within the budget (or if the deadline expires).
+///
+/// The search is a branch-and-bound minimax:
+/// - Candidate probe cells are sorted by their greedy partition score so the
+///   most promising cells are tried first.
+/// - The information-theoretic lower bound `⌈log₂(configs)⌉` prunes hopeless
+///   states immediately.
+/// - `caches.depth_lb` records proven lower bounds so that previously-failed
+///   budget levels are not retried.
+/// - When a `deadline` is provided the search returns `None` as soon as the
+///   clock passes it, allowing a time-limited iterative-deepening loop in the
+///   caller.
 fn search_depth(
     data: &SolverData,
     caches: &mut Caches,
@@ -447,6 +559,14 @@ fn search_depth(
     }
 }
 
+/// Reconstructs the optimal `DecisionTree` for `state` given that
+/// `search_depth` has already confirmed a solution exists within `budget`
+/// probes.
+///
+/// The function re-runs the same candidate enumeration as `search_depth` to
+/// find the first probe cell whose subtrees all fit within `budget - 1`, then
+/// recursively builds each subtree. Panics if no valid probe is found, which
+/// would indicate a logic error (the caller passed an incorrect budget).
 fn build_tree(data: &SolverData, caches: &mut Caches, state: State, budget: u8) -> DecisionTree {
     let total = count_configs(data, caches, state);
     if total <= 1 {
@@ -536,6 +656,8 @@ fn build_tree(data: &SolverData, caches: &mut Caches, state: State, budget: u8) 
 
 // ─── Tree Metrics ────────────────────────────────────────────────────────────
 
+/// Returns the height of the decision tree: the length of the longest path from
+/// the root to a `Leaf`, which equals the worst-case number of probes.
 pub fn tree_height(t: &DecisionTree) -> u8 {
     match t {
         DecisionTree::Leaf => 0,
@@ -551,6 +673,8 @@ pub fn tree_height(t: &DecisionTree) -> u8 {
     }
 }
 
+/// Returns the total number of nodes in the decision tree (both `Probe` and
+/// `Leaf` nodes), which gives a rough measure of tree complexity.
 pub fn tree_node_count(t: &DecisionTree) -> usize {
     match t {
         DecisionTree::Leaf => 1,
@@ -568,19 +692,35 @@ pub fn tree_node_count(t: &DecisionTree) -> usize {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
+/// The public solver, holding precomputed problem data and memoization caches
+/// that persist across multiple `solve` calls for the same grid geometry.
 pub struct Solver {
+    /// Precomputed placements and cell-coverage index for the problem.
     data: SolverData,
+    /// Memoization tables for configuration counts and depth lower bounds.
     caches: Caches,
 }
 
+/// The result of a solve: a complete decision tree together with summary
+/// statistics.
 pub struct Solution {
+    /// Worst-case number of probes required by the decision tree.
     pub depth: u8,
+    /// The decision tree itself.
     pub tree: DecisionTree,
+    /// Total number of valid starting configurations (ways to place all
+    /// treasures in the initial state).
     pub total_configs: u64,
+    /// `true` if `depth` is provably optimal (equals the minimax optimum);
+    /// `false` if the tree was produced by the greedy heuristic and may be
+    /// sub-optimal.
     pub is_optimal: bool,
 }
 
 impl Solver {
+    /// Creates a new `Solver` for the given problem, precomputing all placements
+    /// and the cell-coverage index. The solver can be reused across multiple
+    /// calls to `solve` or `solve_greedy` for the same grid dimensions.
     pub fn new<const A: usize, const B: usize>(problem: &TreasureHuntProblem<A, B>) -> Self {
         let data = build_solver_data(problem);
         let caches = Caches {
@@ -590,6 +730,9 @@ impl Solver {
         Solver { data, caches }
     }
 
+    /// Constructs the initial `State` for the given problem by marking every
+    /// cell that is pre-labeled `CellMark::Empty` as forbidden, and setting
+    /// `remaining[t]` to the count of each treasure type.
     fn initial_state<const A: usize, const B: usize>(
         &self,
         problem: &TreasureHuntProblem<A, B>,
@@ -608,7 +751,12 @@ impl Solver {
         }
     }
 
-    /// Fast greedy solve.
+    /// Solves the problem using the greedy heuristic only.
+    ///
+    /// At each decision node the cell that minimises the worst-case remaining
+    /// configuration count is chosen. This runs quickly but the resulting tree
+    /// depth may be larger than the true minimax optimum. The returned
+    /// `Solution` always has `is_optimal = false`.
     pub fn solve_greedy<const A: usize, const B: usize>(
         &mut self,
         problem: &TreasureHuntProblem<A, B>,
@@ -625,7 +773,19 @@ impl Solver {
         }
     }
 
-    /// Exact solve with time limit; falls back to greedy.
+    /// Attempts an exact minimax solve within `time_limit`, falling back to the
+    /// greedy solution if time runs out.
+    ///
+    /// Strategy:
+    /// 1. Compute the total number of configurations and the greedy upper bound.
+    /// 2. If the greedy depth already equals the information-theoretic lower
+    ///    bound `⌈log₂(configs)⌉`, it is provably optimal and is returned
+    ///    immediately.
+    /// 3. Otherwise, run iterative-deepening exact search from the lower bound
+    ///    up to (but not including) the greedy depth, stopping as soon as a
+    ///    feasible depth is found or the deadline is reached.
+    /// 4. If the deadline expires before finding a better solution, the greedy
+    ///    tree is returned with `is_optimal = false`.
     pub fn solve<const A: usize, const B: usize>(
         &mut self,
         problem: &TreasureHuntProblem<A, B>,
@@ -688,6 +848,8 @@ impl Solver {
         }
     }
 
+    /// Returns the number of distinct valid placements for each of the three
+    /// treasure types, in type order. Useful for diagnostics and logging.
     pub fn placement_counts(&self) -> [usize; 3] {
         std::array::from_fn(|i| self.data.type_placements[i].len())
     }

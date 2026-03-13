@@ -3,6 +3,7 @@ use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 use std::time::{Duration, Instant};
 
+
 /// A single valid placement of a treasure piece on the grid.
 #[derive(Clone, Copy, Debug)]
 struct Placement {

@@ -1,3 +1,14 @@
+//! # Treasure Hunt
+//!
+//! In a map of size `a*b`, there are three types of treasures, with `n_1`, `n_2`, and `n_3` of each type, respectively.
+//! The dimensions of each treasure are `(a_1, b_1)`, `(a_2, b_2)`, and `(a_3, b_3)`.
+//! Treasures can be placed horizontally or vertically.
+//! In a single search, one cell can be revealed;
+//! if a cell contains a treasure, regardless of how the treasure is oriented,
+//! all cells belonging to that treasure are revealed. Find the decision tree with the minimum height.
+//!
+//! Reference values: `a=9`, `b=5`. `1<a_i<b_i<4`. `3<n_1+n_2+n_3<15`.
+
 pub mod algorithm;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

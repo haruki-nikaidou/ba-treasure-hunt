@@ -169,10 +169,20 @@ fn ceil_log2(n: u64) -> u8 {
 //   hit branches = one per placement covering this cell
 // Returns (worst_branch_size, branch_details).
 
+#[derive(Debug, Clone, Copy)]
+struct HitBranch {
+    /// Index into `SolverData::type_placements` selecting the treasure type.
+    treasure_type: usize,
+    /// Index of the specific placement within `type_placements[treasure_type]`.
+    placement_idx: usize,
+    /// Number of valid configurations remaining if this placement is confirmed.
+    config_count: u64,
+}
+
 #[derive(Debug, Clone)]
 struct CellPartition {
     pub worst_branch_size: u64,
-    pub hits: Vec<(usize, usize, u64)>,
+    pub hits: Vec<HitBranch>,
 }
 
 fn cell_partition(
@@ -182,7 +192,7 @@ fn cell_partition(
     ci: usize,
     total: u64,
 ) -> CellPartition {
-    let mut hits: Vec<(usize, usize, u64)> = Vec::new();
+    let mut hits: Vec<HitBranch> = Vec::new();
     let mut hit_sum = 0u64;
 
     for &(t, pi) in &data.cell_coverage[ci] {
@@ -201,13 +211,17 @@ fn cell_partition(
         };
         let cnt = count_configs(data, caches, sub);
         if cnt > 0 {
-            hits.push((t, pi, cnt));
+            hits.push(HitBranch {
+                treasure_type: t,
+                placement_idx: pi,
+                config_count: cnt,
+            });
             hit_sum += cnt;
         }
     }
 
     let miss = total.saturating_sub(hit_sum);
-    let worst = hits.iter().map(|h| h.2).fold(miss, u64::max);
+    let worst = hits.iter().map(|h| h.config_count).fold(miss, u64::max);
     CellPartition {
         worst_branch_size: worst,
         hits,
@@ -234,10 +248,10 @@ fn greedy_depth(data: &SolverData, caches: &mut Caches, state: State) -> u8 {
 
     // Hit branches
     let CellPartition { hits, .. } = cell_partition(data, caches, &state, best_ci, total);
-    for (t, pi, _) in &hits {
-        let p = &data.type_placements[*t][*pi];
+    for &HitBranch { treasure_type: t, placement_idx: pi, .. } in &hits {
+        let p = &data.type_placements[t][pi];
         let mut rem = state.remaining;
-        rem[*t] -= 1;
+        rem[t] -= 1;
         let hs = State {
             forbidden: state.forbidden | p.cells,
             remaining: rem,
@@ -265,7 +279,7 @@ fn greedy_tree(data: &SolverData, caches: &mut Caches, state: State) -> Decision
     let CellPartition { hits, .. } = cell_partition(data, caches, &state, best_ci, total);
     let on_hit: Vec<(PlacementInfo, Box<DecisionTree>)> = hits
         .iter()
-        .map(|&(t, pi, _)| {
+        .map(|&HitBranch { treasure_type: t, placement_idx: pi, .. }| {
             let p = &data.type_placements[t][pi];
             let mut rem = state.remaining;
             rem[t] -= 1;
